@@ -13,6 +13,7 @@ const strategy = require('./strategy');
 const noaa = require('./noaa');
 const weatherSignal = require('./weather-signal');
 const compound = require('./compound');
+const riskManager = require('./risk-manager');
 
 const bot = new Telegraf(config.telegram.token);
 
@@ -557,6 +558,87 @@ bot.command('compoundloss', async (ctx) => {
 });
 
 // ────────────────────────────────────────────────────────────────
+// RISK MANAGEMENT COMMANDS
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * /riskstatus - View daily loss limit status
+ */
+bot.command('riskstatus', async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const text = riskManager.formatStatus(chatId);
+  await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+/**
+ * /setloss <percent> - Set daily loss limit (default 20%)
+ */
+bot.command('setloss', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const chatId = ctx.chat.id.toString();
+
+  if (args.length === 0) {
+    const summary = riskManager.getSummary(chatId);
+    return ctx.reply(
+      '\u{1F6E1} *Daily Loss Limit*\n\n' +
+      `Current: ${(summary.lossLimitPercent * 100).toFixed(0)}% of balance ($${summary.dailyLimitDollars.toFixed(2)})\n\n` +
+      'Usage: /setloss <percent>\n\n' +
+      'Examples:\n' +
+      '/setloss 20 — Max 20% loss per day (default)\n' +
+      '/setloss 10 — Conservative: max 10%\n' +
+      '/setloss 30 — Aggressive: max 30%\n\n' +
+      'Range: 5% - 50%\n\n' +
+      '_Bot auto-pauses trading when limit is hit._\n' +
+      '_Resets every day at 00:00 UTC._',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  if (args[0] === 'off') {
+    riskManager.setEnabled(chatId, false);
+    return ctx.reply('\u{274C} Daily loss limit disabled. Trading has no loss cap.\n\n\u{26A0}\uFE0F Be careful!');
+  }
+
+  if (args[0] === 'on') {
+    riskManager.setEnabled(chatId, true);
+    return ctx.reply('\u{2705} Daily loss limit re-enabled.');
+  }
+
+  const percent = parseFloat(args[0]);
+  if (isNaN(percent) || percent < 5 || percent > 50) {
+    return ctx.reply('\u{274C} Invalid percentage. Must be between 5 and 50.');
+  }
+
+  riskManager.setLossLimit(chatId, percent / 100);
+  const limit = riskManager.getDailyLimitDollars(chatId);
+
+  await ctx.reply(
+    `\u{2705} Daily loss limit set to ${percent.toFixed(0)}%\n\n` +
+    `Max daily loss: $${limit.toFixed(2)}\n` +
+    `Trading will auto-pause if you lose this amount today.\n` +
+    `Resets at 00:00 UTC.`
+  );
+});
+
+/**
+ * /riskreset - Manually reset daily loss counter
+ */
+bot.command('riskreset', async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  riskManager.resetDaily(chatId);
+  await ctx.reply('\u{2705} Daily loss counter reset. Trading resumed.');
+});
+
+/**
+ * /riskunpause - Force unpause trading (override)
+ */
+bot.command('riskunpause', async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  riskManager.forceUnpause(chatId);
+  await ctx.reply('\u{2705} Trading force-unpaused.\n\n\u{26A0}\uFE0F Daily loss counter NOT reset. Use /riskreset to reset counter too.');
+});
+
+// ────────────────────────────────────────────────────────────────
 // TRADING COMMANDS
 // ────────────────────────────────────────────────────────────────
 
@@ -566,6 +648,13 @@ bot.command('compoundloss', async (ctx) => {
 bot.command('buy', async (ctx) => {
   if (!trader.isReady()) {
     return ctx.reply('\u{26A0}\uFE0F Trading is not enabled. Set PRIVATE_KEY in .env to activate.');
+  }
+
+  // Check risk limit
+  const chatId = ctx.chat.id.toString();
+  const riskCheck = riskManager.canTrade(chatId);
+  if (!riskCheck.allowed) {
+    return ctx.reply(`\u{1F6D1} ${riskCheck.reason}\n\nUse /riskreset to reset or wait until 00:00 UTC.`);
   }
 
   const args = ctx.message.text.split(' ').slice(1);
