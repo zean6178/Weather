@@ -18,6 +18,7 @@ const polymarket = require('./polymarket');
 const logger = require('./logger');
 const config = require('./config');
 const compound = require('./compound');
+const riskManager = require('./risk-manager');
 
 // Active strategies per user (chatId -> strategy[])
 const activeStrategies = new Map();
@@ -294,6 +295,13 @@ async function evaluateStrategies(notifyCallback) {
  * Evaluate a single strategy against current market data
  */
 async function evaluateStrategy(chatId, strategy, notifyCallback) {
+  // Risk check: block trading if daily loss limit reached
+  const riskCheck = riskManager.canTrade(chatId);
+  if (!riskCheck.allowed) {
+    logger.debug(`Strategy ${strategy.id} blocked by risk manager: ${riskCheck.reason}`);
+    return;
+  }
+
   // Get current price
   const currentPrice = await trader.getPrice(strategy.tokenId, 'BUY');
   if (currentPrice === 0) return; // Skip if price unavailable
@@ -370,6 +378,11 @@ async function evaluateAutoBuy(chatId, strategy, currentPrice, notify) {
     if (notify) {
       const compoundNote = compound.isEnabled(chatId) ? ` [COMPOUND: $${(size * strategy.targetPrice).toFixed(2)}]` : '';
       await notify(chatId, formatExecutionMessage('AUTO_BUY', { ...strategy, size }, result, currentPrice) + compoundNote);
+
+      // Send risk warning/limit notification
+      if (riskCheck.remaining < riskManager.getDailyLimitDollars(chatId) * 0.2) {
+        await notify(chatId, `\u{26A0}\uFE0F Risk: $${riskCheck.remaining.toFixed(2)} remaining before daily limit`);
+      }
     }
   }
 }
@@ -410,6 +423,7 @@ async function evaluateAutoSell(chatId, strategy, currentPrice, notify) {
     if (result.success && compound.isEnabled(chatId)) {
       const returned = size * strategy.targetPrice;
       compound.recordTradeResult(chatId, { invested: 0, returned, won: true });
+      riskManager.recordWin(chatId, returned);
     }
 
     if (notify) {
@@ -439,6 +453,18 @@ async function evaluateStopLoss(chatId, strategy, currentPrice, notify) {
     strategy.status = 'EXECUTED';
     strategy.executedAt = new Date().toISOString();
     strategy.orderId = result.orderId;
+
+    // Record loss in risk manager (stop-loss = confirmed loss)
+    if (result.success) {
+      const lossAmount = strategy.size * (1 - strategy.stopPrice); // Approximate loss
+      const riskResult = riskManager.recordLoss(chatId, lossAmount);
+
+      if (notify && riskResult.limitReached) {
+        await notify(chatId, '\u{1F6D1} *DAILY LOSS LIMIT REACHED*\n\nTrading is now PAUSED until 00:00 UTC tomorrow.\nUse /riskstatus to check.');
+      } else if (notify && riskResult.warning) {
+        await notify(chatId, `\u{26A0}\uFE0F *Risk Warning:* ${riskResult.usedPercent}% of daily loss limit used ($${riskResult.dailyLoss.toFixed(2)} / $${riskResult.limit.toFixed(2)})`);
+      }
+    }
 
     if (notify) {
       await notify(chatId, formatExecutionMessage('STOP_LOSS', strategy, result, sellPrice));
