@@ -10,6 +10,8 @@ const cache = require('./cache');
 const logger = require('./logger');
 const trader = require('./trader');
 const strategy = require('./strategy');
+const noaa = require('./noaa');
+const weatherSignal = require('./weather-signal');
 
 const bot = new Telegraf(config.telegram.token);
 
@@ -248,6 +250,154 @@ bot.command('alerts', async (ctx) => {
     'Or use: /alerts clear - to remove all alerts\n' +
     'Use: /alerts - to view active alerts'
   );
+});
+
+// ────────────────────────────────────────────────────────────────
+// NOAA FORECAST & SIGNAL COMMANDS
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * /forecast <city> - Get NOAA/Open-Meteo weather forecast
+ */
+bot.command('forecast', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1).join(' ').trim();
+  if (!args) {
+    const cities = noaa.getSupportedCities()
+      .filter((c, i, arr) => arr.findIndex((x) => x.name === c.name) === i)
+      .map((c) => c.name)
+      .join(', ');
+    return ctx.reply(
+      '\u{1F321} *Weather Forecast*\n\n' +
+      'Usage: /forecast <city>\n\n' +
+      'Example: /forecast NYC\n\n' +
+      `Supported cities: ${cities}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  const city = noaa.findCity(args);
+  if (!city) {
+    return ctx.reply(`\u{274C} City "${args}" not found. Use /forecast to see supported cities.`);
+  }
+
+  await ctx.reply(`\u{1F30D} Fetching forecast for ${city.name}...`);
+
+  const forecast = await noaa.getForecast(city.key);
+  if (!forecast) {
+    return ctx.reply(`\u{274C} Could not fetch forecast for ${city.name}. Try again later.`);
+  }
+
+  let text = `\u{1F321} *Weather Forecast: ${forecast.city}*\n`;
+  text += `Source: ${forecast.source}\n\n`;
+
+  if (forecast.today) {
+    const tempDisplay = forecast.today.unit === 'F'
+      ? `${forecast.today.high}\u{00B0}F (${noaa.fahrenheitToCelsius(forecast.today.high)}\u{00B0}C)`
+      : `${forecast.today.high}\u{00B0}C (${forecast.maxTodayF || noaa.celsiusToFahrenheit(forecast.today.high)}\u{00B0}F)`;
+    text += `\u{2600}\uFE0F *Today:* High ${tempDisplay}\n`;
+    if (forecast.today.description) text += `   ${forecast.today.description}\n`;
+  }
+
+  if (forecast.tomorrow) {
+    const tempDisplay = forecast.tomorrow.unit === 'F'
+      ? `${forecast.tomorrow.high}\u{00B0}F (${noaa.fahrenheitToCelsius(forecast.tomorrow.high)}\u{00B0}C)`
+      : `${forecast.tomorrow.high}\u{00B0}C (${forecast.maxTomorrowF || noaa.celsiusToFahrenheit(forecast.tomorrow.high)}\u{00B0}F)`;
+    text += `\u{1F324} *Tomorrow:* High ${tempDisplay}\n`;
+    if (forecast.tomorrow.description) text += `   ${forecast.tomorrow.description}\n`;
+  }
+
+  text += `\n_Fetched: ${new Date(forecast.fetchedAt).toLocaleTimeString()}_`;
+
+  await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+/**
+ * /signals - Get NOAA-based trading signals (forecast vs market odds)
+ */
+bot.command('signals', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1).join(' ').trim();
+
+  if (args) {
+    // Signals for a specific city
+    await ctx.reply(`\u{1F4E1} Analyzing ${args} forecast vs market odds...`);
+    const signals = await weatherSignal.generateSignals(args);
+
+    if (signals.length === 0) {
+      return ctx.reply(
+        `\u{26AA} No actionable signals for "${args}".\n\n` +
+        `Market prices align with the current weather forecast, or no matching markets found.`
+      );
+    }
+
+    let text = `\u{1F4E1} *Signals for ${args}* (${signals.length})\n\n`;
+    for (const s of signals.slice(0, 5)) {
+      text += weatherSignal.formatSignal(s) + '\n\n';
+    }
+    return ctx.reply(text, { parse_mode: 'Markdown' });
+  }
+
+  // All signals across all cities
+  await ctx.reply('\u{1F4E1} Scanning all cities for mispriced weather markets...');
+  const signals = await weatherSignal.generateAllSignals();
+  const text = weatherSignal.formatSignalsSummary(signals);
+  await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+/**
+ * /autosignal - Auto-execute trades based on NOAA signals (if trading enabled)
+ */
+bot.command('autosignal', async (ctx) => {
+  if (!trader.isReady()) {
+    return ctx.reply('\u{26A0}\uFE0F Trading not enabled. /signals shows signals without executing.');
+  }
+
+  const args = ctx.message.text.split(' ').slice(1);
+  const minEdge = args[0] ? parseFloat(args[0]) / 100 : 0.15; // Default 15% edge minimum
+
+  if (isNaN(minEdge) || minEdge < 0.05 || minEdge > 0.50) {
+    return ctx.reply('Usage: /autosignal [minEdge%]\n\nExample: /autosignal 20\n(Only execute signals with 20%+ edge)\n\nRange: 5-50');
+  }
+
+  await ctx.reply(`\u{1F916} Scanning for signals with \u{2265}${(minEdge * 100).toFixed(0)}% edge...`);
+
+  const signals = await weatherSignal.generateAllSignals();
+  const actionable = signals.filter((s) => Math.abs(s.edge) >= minEdge && s.tokenId);
+
+  if (actionable.length === 0) {
+    return ctx.reply('\u{26AA} No signals meet the minimum edge threshold.');
+  }
+
+  let executed = 0;
+  let text = `\u{1F916} *Auto-Signal Execution*\n\n`;
+
+  for (const signal of actionable.slice(0, 3)) { // Max 3 trades at once
+    const chatId = ctx.chat.id.toString();
+
+    if (signal.type.includes('BUY')) {
+      const s = strategy.createAutoBuy(chatId, {
+        tokenId: signal.tokenId,
+        marketQuestion: `[SIGNAL] ${signal.market}`,
+        targetPrice: signal.marketPrice, // Buy at current (underpriced) market price
+        size: Math.min(config.trading.maxPositionSize / signal.marketPrice, 100),
+      });
+      text += `\u{1F7E2} AUTO-BUY set: "${signal.outcome}" @ $${signal.marketPrice}\n`;
+      text += `   Edge: +${(signal.edge * 100).toFixed(1)}% | Confidence: ${signal.confidence}%\n\n`;
+      executed++;
+    } else if (signal.type.includes('SELL')) {
+      const s = strategy.createAutoSell(chatId, {
+        tokenId: signal.tokenId,
+        marketQuestion: `[SIGNAL] ${signal.market}`,
+        targetPrice: signal.marketPrice,
+        size: 50,
+      });
+      text += `\u{1F534} AUTO-SELL set: "${signal.outcome}" @ $${signal.marketPrice}\n`;
+      text += `   Edge: ${(signal.edge * 100).toFixed(1)}% | Confidence: ${signal.confidence}%\n\n`;
+      executed++;
+    }
+  }
+
+  text += `\n\u{2705} ${executed} strategies created from NOAA signals.\nUse /strategies to view, /cancelall to abort.`;
+  await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
 // ────────────────────────────────────────────────────────────────
