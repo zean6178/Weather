@@ -1,7 +1,7 @@
 {
   "name": "polymarket-weather-bot",
-  "version": "2.0.0",
-  "description": "Powerful Telegram bot for Polymarket weather prediction markets with auto-trading",
+  "version": "2.1.0",
+  "description": "Powerful Telegram bot for Polymarket weather prediction markets with auto-trading and NOAA signal engine",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -13,7 +13,10 @@
     "prediction-market",
     "telegram-bot",
     "auto-trading",
-    "clob"
+    "clob",
+    "noaa",
+    "weather-signals",
+    "open-meteo"
   ],
   "author": "",
   "license": "MIT",

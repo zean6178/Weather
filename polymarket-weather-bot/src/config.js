@@ -34,6 +34,14 @@ const config = {
     // Max total exposure across all positions
     maxTotalExposure: parseFloat(process.env.MAX_TOTAL_EXPOSURE) || 5000,
   },
+  forecast: {
+    // Minimum edge (%) to generate a signal (default 12%)
+    minEdgePercent: parseFloat(process.env.SIGNAL_MIN_EDGE_PERCENT) || 12,
+    // Minimum edge (%) for auto-execution (default 15%)
+    autoExecMinEdgePercent: parseFloat(process.env.SIGNAL_AUTO_EXEC_EDGE_PERCENT) || 15,
+    // NOAA User-Agent contact email (recommended by weather.gov)
+    noaaContact: process.env.NOAA_CONTACT_EMAIL || 'polymarket-bot@example.com',
+  },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
   },
