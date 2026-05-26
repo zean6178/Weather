@@ -1,7 +1,7 @@
 {
   "name": "polymarket-weather-bot",
-  "version": "1.0.0",
-  "description": "Powerful Telegram bot for Polymarket weather prediction market data",
+  "version": "2.0.0",
+  "description": "Powerful Telegram bot for Polymarket weather prediction markets with auto-trading",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -11,15 +11,19 @@
     "polymarket",
     "weather",
     "prediction-market",
-    "telegram-bot"
+    "telegram-bot",
+    "auto-trading",
+    "clob"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.0",
     "axios": "^1.7.0",
     "dotenv": "^16.4.0",
     "node-cron": "^3.0.3",
     "telegraf": "^4.16.0",
+    "viem": "^2.21.0",
     "winston": "^3.14.0"
   },
   "devDependencies": {
