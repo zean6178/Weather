@@ -17,6 +17,7 @@ const trader = require('./trader');
 const polymarket = require('./polymarket');
 const logger = require('./logger');
 const config = require('./config');
+const compound = require('./compound');
 
 // Active strategies per user (chatId -> strategy[])
 const activeStrategies = new Map();
@@ -327,10 +328,20 @@ async function evaluateAutoBuy(chatId, strategy, currentPrice, notify) {
   if (currentPrice <= strategy.targetPrice) {
     logger.info(`AUTO_BUY triggered: ${strategy.tokenId} @ ${currentPrice} <= ${strategy.targetPrice}`);
 
+    // Use compound sizing if enabled, otherwise use strategy's fixed size
+    let size = strategy.size;
+    if (compound.isEnabled(chatId)) {
+      const compoundSize = compound.calculateShares(chatId, strategy.targetPrice);
+      if (compoundSize > 0) {
+        size = compoundSize;
+        logger.info(`Compound sizing: ${size} shares (balance-based) instead of fixed ${strategy.size}`);
+      }
+    }
+
     const result = await trader.placeBuyOrder(
       strategy.tokenId,
       strategy.targetPrice,
-      strategy.size,
+      size,
       { tickSize: strategy.tickSize, negRisk: strategy.negRisk }
     );
 
@@ -344,13 +355,21 @@ async function evaluateAutoBuy(chatId, strategy, currentPrice, notify) {
         tokenId: strategy.tokenId,
         marketQuestion: strategy.marketQuestion,
         entryPrice: strategy.targetPrice,
-        size: strategy.size,
+        size,
         orderId: result.orderId,
       });
+
+      // Record compound investment (deduct from balance)
+      if (compound.isEnabled(chatId)) {
+        const invested = size * strategy.targetPrice;
+        compound.recordTradeResult(chatId, { invested, returned: 0, won: false });
+        // Note: returned=0 for now; will update when position closes
+      }
     }
 
     if (notify) {
-      await notify(chatId, formatExecutionMessage('AUTO_BUY', strategy, result, currentPrice));
+      const compoundNote = compound.isEnabled(chatId) ? ` [COMPOUND: $${(size * strategy.targetPrice).toFixed(2)}]` : '';
+      await notify(chatId, formatExecutionMessage('AUTO_BUY', { ...strategy, size }, result, currentPrice) + compoundNote);
     }
   }
 }
@@ -366,10 +385,20 @@ async function evaluateAutoSell(chatId, strategy, currentPrice, notify) {
   if (sellPrice >= strategy.targetPrice) {
     logger.info(`AUTO_SELL triggered: ${strategy.tokenId} @ ${sellPrice} >= ${strategy.targetPrice}`);
 
+    // Use compound sizing if enabled
+    let size = strategy.size;
+    if (compound.isEnabled(chatId)) {
+      const compoundSize = compound.calculateShares(chatId, strategy.targetPrice);
+      if (compoundSize > 0) {
+        size = compoundSize;
+        logger.info(`Compound sizing (sell): ${size} shares`);
+      }
+    }
+
     const result = await trader.placeSellOrder(
       strategy.tokenId,
       strategy.targetPrice,
-      strategy.size,
+      size,
       { tickSize: strategy.tickSize, negRisk: strategy.negRisk }
     );
 
@@ -377,8 +406,15 @@ async function evaluateAutoSell(chatId, strategy, currentPrice, notify) {
     strategy.executedAt = new Date().toISOString();
     strategy.orderId = result.orderId;
 
+    // Record compound profit on sell
+    if (result.success && compound.isEnabled(chatId)) {
+      const returned = size * strategy.targetPrice;
+      compound.recordTradeResult(chatId, { invested: 0, returned, won: true });
+    }
+
     if (notify) {
-      await notify(chatId, formatExecutionMessage('AUTO_SELL', strategy, result, sellPrice));
+      const compoundNote = compound.isEnabled(chatId) ? ` [COMPOUND: +$${(size * strategy.targetPrice).toFixed(2)}]` : '';
+      await notify(chatId, formatExecutionMessage('AUTO_SELL', { ...strategy, size }, result, sellPrice) + compoundNote);
     }
   }
 }
