@@ -18,6 +18,22 @@ const config = {
     maxMarketsPerPage: parseInt(process.env.MAX_MARKETS_PER_PAGE, 10) || 10,
     pollingIntervalMinutes: parseInt(process.env.POLLING_INTERVAL_MINUTES, 10) || 5,
   },
+  trading: {
+    // Private key for signing orders (hex string starting with 0x)
+    privateKey: process.env.PRIVATE_KEY || null,
+    // Funder/deposit wallet address (where pUSD is held)
+    funderAddress: process.env.FUNDER_ADDRESS || null,
+    // Signature type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, 3=POLY_1271 (deposit wallet)
+    signatureType: parseInt(process.env.SIGNATURE_TYPE, 10) || 0,
+    // Polygon RPC URL for signing transactions
+    rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
+    // Strategy check interval in seconds
+    strategyCheckSeconds: parseInt(process.env.STRATEGY_CHECK_SECONDS, 10) || 30,
+    // Max position size per trade (safety limit)
+    maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE) || 1000,
+    // Max total exposure across all positions
+    maxTotalExposure: parseFloat(process.env.MAX_TOTAL_EXPOSURE) || 5000,
+  },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
   },
