@@ -12,6 +12,7 @@ const trader = require('./trader');
 const strategy = require('./strategy');
 const noaa = require('./noaa');
 const weatherSignal = require('./weather-signal');
+const compound = require('./compound');
 
 const bot = new Telegraf(config.telegram.token);
 
@@ -398,6 +399,161 @@ bot.command('autosignal', async (ctx) => {
 
   text += `\n\u{2705} ${executed} strategies created from NOAA signals.\nUse /strategies to view, /cancelall to abort.`;
   await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+// ────────────────────────────────────────────────────────────────
+// AUTO-COMPOUND COMMANDS
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * /compound [balance] - Enable/view auto-compound mode
+ * Usage:
+ *   /compound         - Show current compound status
+ *   /compound 10      - Enable with $10 initial balance (50% per trade)
+ *   /compound 100 60  - Enable with $100 balance, 60% ratio
+ *   /compound off     - Disable compound mode
+ *   /compound sync    - Sync balance from wallet
+ */
+bot.command('compound', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const chatId = ctx.chat.id.toString();
+
+  // No args → show status
+  if (args.length === 0) {
+    const text = compound.formatSummary(chatId);
+    return ctx.reply(text, { parse_mode: 'Markdown' });
+  }
+
+  // /compound off
+  if (args[0] === 'off' || args[0] === 'disable') {
+    compound.disable(chatId);
+    return ctx.reply('\u{274C} Auto-compound disabled. Trade sizes will use fixed amounts.');
+  }
+
+  // /compound sync
+  if (args[0] === 'sync') {
+    if (!trader.isReady()) {
+      return ctx.reply('\u{26A0}\uFE0F Trading not enabled. Cannot sync balance.');
+    }
+    await ctx.reply('\u{1F504} Syncing balance from wallet...');
+    const config = await compound.syncBalance(chatId);
+    if (config) {
+      return ctx.reply(`\u{2705} Balance synced: $${config.currentBalance.toFixed(2)}\nNext trade size: $${compound.calculateTradeSize(chatId).toFixed(2)}`);
+    }
+    return ctx.reply('\u{274C} Could not sync balance. Enable compound first with /compound <amount>');
+  }
+
+  // /compound <balance> [ratio]
+  const initialBalance = parseFloat(args[0]);
+  if (isNaN(initialBalance) || initialBalance <= 0) {
+    return ctx.reply(
+      '\u{1F4B0} *Auto-Compound Mode*\n\n' +
+      'Automatically scales trade size based on your balance.\n' +
+      'Always trades 50% of current balance.\n\n' +
+      '*Usage:*\n' +
+      '/compound 10 — Start with $10 (trade $5 each time)\n' +
+      '/compound 100 60 — Start with $100, 60% ratio\n' +
+      '/compound off — Disable\n' +
+      '/compound sync — Sync from wallet\n' +
+      '/compound — View status\n\n' +
+      '*How it works:*\n' +
+      '• $10 balance → trade $5\n' +
+      '• Profit → $20 balance → trade $10\n' +
+      '• Profit → $1,000 balance → trade $500\n' +
+      '• Profit → $10,000 balance → trade $5,000\n\n' +
+      '_Compounds automatically with /autobuy and /autosell_',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  const ratio = args[1] ? parseFloat(args[1]) / 100 : 0.5; // Default 50%
+  if (isNaN(ratio) || ratio <= 0 || ratio > 0.95) {
+    return ctx.reply('\u{274C} Invalid ratio. Must be between 1-95 (percent).');
+  }
+
+  const config = compound.enable(chatId, {
+    initialBalance,
+    ratio,
+  });
+
+  const nextSize = compound.calculateTradeSize(chatId);
+
+  await ctx.reply(
+    `\u{2705} *Auto-Compound Enabled!*\n\n` +
+    `Initial Balance: $${initialBalance.toFixed(2)}\n` +
+    `Ratio: ${(ratio * 100).toFixed(0)}% per trade\n` +
+    `Next Trade Size: $${nextSize.toFixed(2)}\n\n` +
+    `*Scaling:*\n` +
+    `• $${initialBalance} → trade $${nextSize.toFixed(2)}\n` +
+    `• $${(initialBalance * 2).toFixed(0)} → trade $${(initialBalance * 2 * ratio).toFixed(2)}\n` +
+    `• $${(initialBalance * 100).toFixed(0)} → trade $${(initialBalance * 100 * ratio).toFixed(2)}\n` +
+    `• $${(initialBalance * 1000).toFixed(0)} → trade $${Math.min(initialBalance * 1000 * ratio, 10000).toFixed(2)}\n\n` +
+    `_Now use /autobuy or /autosell — size auto-scales!_\n` +
+    `_Use /compound to check status anytime_`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+/**
+ * /compoundwin <amount> - Manually record a win (updates compound balance)
+ */
+bot.command('compoundwin', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const chatId = ctx.chat.id.toString();
+
+  if (!compound.isEnabled(chatId)) {
+    return ctx.reply('\u{26A0}\uFE0F Compound not enabled. Use /compound <balance> first.');
+  }
+
+  if (args.length === 0) {
+    return ctx.reply('Usage: /compoundwin <profit_amount>\n\nExample: /compoundwin 5\n(Record $5 profit)');
+  }
+
+  const profit = parseFloat(args[0]);
+  if (isNaN(profit) || profit <= 0) {
+    return ctx.reply('\u{274C} Invalid amount. Must be a positive number.');
+  }
+
+  compound.recordTradeResult(chatId, { invested: 0, returned: profit, won: true });
+  const summary = compound.getSummary(chatId);
+
+  await ctx.reply(
+    `\u{2705} Win recorded: +$${profit.toFixed(2)}\n\n` +
+    `New Balance: $${summary.currentBalance.toFixed(2)}\n` +
+    `Next Trade: $${summary.nextTradeSize.toFixed(2)}\n` +
+    `Total P&L: ${summary.totalProfit >= 0 ? '+' : ''}$${summary.totalProfit.toFixed(2)}`
+  );
+});
+
+/**
+ * /compoundloss <amount> - Manually record a loss (updates compound balance)
+ */
+bot.command('compoundloss', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const chatId = ctx.chat.id.toString();
+
+  if (!compound.isEnabled(chatId)) {
+    return ctx.reply('\u{26A0}\uFE0F Compound not enabled. Use /compound <balance> first.');
+  }
+
+  if (args.length === 0) {
+    return ctx.reply('Usage: /compoundloss <loss_amount>\n\nExample: /compoundloss 3\n(Record $3 loss)');
+  }
+
+  const loss = parseFloat(args[0]);
+  if (isNaN(loss) || loss <= 0) {
+    return ctx.reply('\u{274C} Invalid amount. Must be a positive number.');
+  }
+
+  compound.recordTradeResult(chatId, { invested: loss, returned: 0, won: false });
+  const summary = compound.getSummary(chatId);
+
+  await ctx.reply(
+    `\u{274C} Loss recorded: -$${loss.toFixed(2)}\n\n` +
+    `New Balance: $${summary.currentBalance.toFixed(2)}\n` +
+    `Next Trade: $${summary.nextTradeSize.toFixed(2)}\n` +
+    `Total P&L: ${summary.totalProfit >= 0 ? '+' : ''}$${summary.totalProfit.toFixed(2)}`
+  );
 });
 
 // ────────────────────────────────────────────────────────────────
